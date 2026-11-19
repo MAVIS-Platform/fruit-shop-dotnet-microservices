@@ -1,0 +1,170 @@
+services:
+  catalog-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${CATALOG_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${CATALOG_DB_PASSWORD:-postgres_dev_change_me}
+      POSTGRES_DB: ${CATALOG_DB_NAME:-catalog_db}
+    expose:
+      - "5432"
+    volumes:
+      - catalog_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CATALOG_DB_USER:-postgres} -d ${CATALOG_DB_NAME:-catalog_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fruitshop-net
+
+  ordering-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${ORDERING_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${ORDERING_DB_PASSWORD:-postgres_dev_change_me}
+      POSTGRES_DB: ${ORDERING_DB_NAME:-ordering_db}
+    expose:
+      - "5432"
+    volumes:
+      - ordering_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ORDERING_DB_USER:-postgres} -d ${ORDERING_DB_NAME:-ordering_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fruitshop-net
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - fruitshop-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "15672:15672"
+    expose:
+      - "5672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fruitshop-net
+
+  fruit-catalog-api:
+    build:
+      context: .
+      dockerfile: src/Services/FruitCatalog/FruitCatalog.API/Dockerfile
+    expose:
+      - "8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__CatalogDb: "Host=catalog-db;Port=5432;Database=${CATALOG_DB_NAME:-catalog_db};Username=${CATALOG_DB_USER:-postgres};Password=${CATALOG_DB_PASSWORD:-postgres_dev_change_me}"
+      Jwt__Issuer: ${JWT_ISSUER:-FreshFruit.Auth}
+      Jwt__Audience: ${JWT_AUDIENCE:-FreshFruit.Clients}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:-FreshFruit-SuperSecret-Dev-SigningKey-Min32Chars-2026!}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+    networks:
+      - fruitshop-net
+
+  fruit-basket-api:
+    build:
+      context: .
+      dockerfile: src/Services/FruitBasket/FruitBasket.API/Dockerfile
+    expose:
+      - "8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Redis: "redis:6379"
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Port: 5672
+      RabbitMq__VirtualHost: "/"
+      RabbitMq__Username: ${RABBITMQ_USER:-guest}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      Jwt__Issuer: ${JWT_ISSUER:-FreshFruit.Auth}
+      Jwt__Audience: ${JWT_AUDIENCE:-FreshFruit.Clients}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:-FreshFruit-SuperSecret-Dev-SigningKey-Min32Chars-2026!}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - fruitshop-net
+
+  fruit-ordering-api:
+    build:
+      context: .
+      dockerfile: src/Services/FruitOrdering/FruitOrdering.API/Dockerfile
+    expose:
+      - "8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__OrderingDb: "Host=ordering-db;Port=5432;Database=${ORDERING_DB_NAME:-ordering_db};Username=${ORDERING_DB_USER:-postgres};Password=${ORDERING_DB_PASSWORD:-postgres_dev_change_me}"
+      ServiceUrls__CatalogApi: "http://fruit-catalog-api:8080"
+      ServiceUrls__BasketApi: "http://fruit-basket-api:8080"
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Port: 5672
+      RabbitMq__VirtualHost: "/"
+      RabbitMq__Username: ${RABBITMQ_USER:-guest}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-guest}
+      Jwt__Issuer: ${JWT_ISSUER:-FreshFruit.Auth}
+      Jwt__Audience: ${JWT_AUDIENCE:-FreshFruit.Clients}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:-FreshFruit-SuperSecret-Dev-SigningKey-Min32Chars-2026!}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      ordering-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - fruitshop-net
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: src/Gateways/ApiGateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Jwt__Issuer: ${JWT_ISSUER:-FreshFruit.Auth}
+      Jwt__Audience: ${JWT_AUDIENCE:-FreshFruit.Clients}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:-FreshFruit-SuperSecret-Dev-SigningKey-Min32Chars-2026!}
+      Jwt__ExpirationMinutes: 120
+      DemoAuth__Password: ${DEMO_AUTH_PASSWORD:-FreshFruit@123}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      fruit-catalog-api:
+        condition: service_started
+      fruit-basket-api:
+        condition: service_started
+      fruit-ordering-api:
+        condition: service_started
+    networks:
+      - fruitshop-net
+
+volumes:
+  catalog_db_data:
+  ordering_db_data:
+
+networks:
+  fruitshop-net:
+    driver: bridge
